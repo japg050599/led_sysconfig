@@ -62,9 +62,59 @@
 #include "device.h"
 #include "board.h"
 
-//
-// Main
-//
+#include <math.h>
+#include <stdbool.h>
+#include <stdlib.h>
+
+#define SIGNAL_SIZE        80
+#define FILTER_SIZE        16
+#define PWM_PERIOD         100
+#define PI_VALUE           3.14159265f
+
+typedef enum
+{
+    STATE_IDLE = 0,
+    STATE_POSITIVE,
+    STATE_NEGATIVE
+
+} SystemState_t;
+
+// ===================== VARIÁVEIS GLOBAIS =====================
+
+// Flag habilitação
+bool g_enableModulation = true;
+
+// ADC bruto e filtrado
+float g_rawSignal = 0.0f;
+float g_filteredSignal = 0.0f;
+
+// Buffer média móvel
+float g_buffer[FILTER_SIZE];
+unsigned int g_bufferIndex = 0;
+
+// FSM
+SystemState_t g_state = STATE_IDLE;
+
+// PWM
+unsigned int g_pwmCounter = 0;
+float g_duty = 0.0f;
+
+// senoide
+float g_theta = 0.0f;
+float g_buffersignal[SIGNAL_SIZE];
+float g_bufferfilteredsignal[SIGNAL_SIZE];
+unsigned int g_buffersignalIndex = 0;
+
+// ===================== PROTÓTIPOS =====================
+
+float generateSimulatedADC(void);
+float movingAverage(float sample);
+void updateFSM(void);
+void updatePWM(void);
+
+
+// ===================== MAIN ===========================
+
 void main(void)
 {
     // Device Initialization
@@ -95,12 +145,168 @@ void main(void)
 	
 }
 
+// ===================== ISR TIMER =====================
+
 __interrupt void INT_Led_Toggle_Timer_ISR(void)
 {
-    GPIO_togglePin(myBoardLED0_GPIO);
-    GPIO_togglePin(myBoardLED1_GPIO);
+ //   GPIO_togglePin(myBoardLED0_GPIO);
+ //   GPIO_togglePin(myBoardLED1_GPIO);
+
+ // =====================================================
+    // 1. ADC SIMULADO
+    // =====================================================
+
+    g_rawSignal = generateSimulatedADC();
+    g_buffersignal[g_buffersignalIndex] = g_rawSignal;
+    
+
+    // =====================================================
+    // 2. FILTRO
+    // =====================================================
+
+    g_filteredSignal = movingAverage(g_rawSignal);
+    g_bufferfilteredsignal[g_buffersignalIndex] = g_filteredSignal;
+
+    g_buffersignalIndex = (g_buffersignalIndex + 1)%SIGNAL_SIZE;
+
+    // Centraliza em zero
+    g_filteredSignal = g_filteredSignal - 2048.0f;
+
+    // =====================================================
+    // 3. FSM
+    // =====================================================
+
+    updateFSM();
+
+    // =====================================================
+    // 4. PWM SOFTWARE
+    // =====================================================
+
+    updatePWM();
+
 
     Interrupt_clearACKGroup(INT_Led_Toggle_Timer_INTERRUPT_ACK_GROUP);
+}
+
+// ===================== ADC SIMULADO =====================
+
+float generateSimulatedADC(void)
+{
+    float noise;
+
+    // senoide centrada em 2048
+    float signal = 2048.0f + 1000.0f * sinf(g_theta);
+
+    // ruído +-50
+    noise = ((float)(rand() % 100) - 50.0f);
+
+    //g_theta += 0.08f;
+    g_theta += 0.07854f;
+
+    if(g_theta >= 2.0f * PI_VALUE)
+    {
+        g_theta = 0.0f;
+        //g_theta -= 2.0f * PI_VALUE;
+    }
+
+    return signal + noise;
+}
+
+// ===================== MÉDIA MÓVEL =====================
+
+float movingAverage(float sample)
+{
+    float sum = 0.0f;
+    unsigned int i;
+
+    g_buffer[g_bufferIndex] = sample;
+
+    g_bufferIndex++;
+
+    if(g_bufferIndex >= FILTER_SIZE)
+    {
+        g_bufferIndex = 0;
+    }
+
+    for(i = 0; i < FILTER_SIZE; i++)
+    {
+        sum += g_buffer[i];
+    }
+
+    return sum / FILTER_SIZE;
+}
+
+
+// ===================== FSM =====================
+
+void updateFSM(void)
+{
+    if(g_enableModulation == false)
+    {
+        g_state = STATE_IDLE;
+        return;
+    }
+
+    if(g_filteredSignal > 0)
+    {
+        g_state = STATE_POSITIVE;
+    }
+    else
+    {
+        g_state = STATE_NEGATIVE;
+    }
+}
+
+
+// ===================== PWM =====================
+
+void updatePWM(void)
+{
+    float absValue;
+
+    g_pwmCounter++;
+
+    if(g_pwmCounter >= PWM_PERIOD)
+    {
+        g_pwmCounter = 0;
+    }
+
+    // LEDs OFF inicialmente
+    GPIO_writePin(myBoardLED0_GPIO, 1);
+    GPIO_writePin(myBoardLED1_GPIO, 1);
+
+    if(g_state == STATE_IDLE)
+    {
+        return;
+    }
+
+    absValue = fabsf(g_filteredSignal);
+
+    // duty proporcional
+    g_duty = absValue / 1000.0f;
+
+    if(g_duty > 1.0f)
+    {
+        g_duty = 1.0f;
+    }
+
+    unsigned int compare = (unsigned int)(g_duty * PWM_PERIOD);
+
+    if(g_state == STATE_POSITIVE)
+    {
+        if(g_pwmCounter < compare)
+        {
+            GPIO_writePin(myBoardLED0_GPIO, 0);
+        }
+    }
+
+    if(g_state == STATE_NEGATIVE)
+    {
+        if(g_pwmCounter < compare)
+        {
+            GPIO_writePin(myBoardLED1_GPIO, 0);
+        }
+    }
 }
 
 //
